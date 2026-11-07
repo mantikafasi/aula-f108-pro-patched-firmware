@@ -10,7 +10,7 @@ screen** (USB `0C45:800A`, Sonix SN32F290). It adds:
 Everything else is the stock firmware: keys, lighting, wireless, RTC clock and boot GIF are untouched.
 
 > **Status: experimental.** One keyboard so far. The v2 overlay (title + progress bar, 1 Hz updates) has run on real
-> hardware. **v3 (smooth scroll, flash read/config backup) is emulator-tested only; hardware test pending.**
+> hardware. **v4 (smooth ~30 fps scrolling title, flash read for config backup, diagnostics) has run on real hardware.** (v3 did not scroll: stale SRAM from the previous firmware survived the flash; fixed by versioning the state marker.)
 > Flashing replaces the firmware and can leave the keyboard unusable until re-flashed. This project is not affiliated with AULA, Sonix or HFD. See [Safety](#safety).
 
 ## How it works (short)
@@ -52,7 +52,7 @@ python build_all.py "AULA F108PRO Reset.zip"
 
 1. Close the AULA driver software. Keyboard on the **USB cable**.
 2. Run the patched flasher, click **Start** once, wait ~20 s (the keyboard disconnects and reconnects).
-3. `python host/aula_screen.py probe` should print `patched firmware v3`.
+3. `python host/aula_screen.py probe` should print `patched firmware v4`.
 4. Flashing resets the keyboard's stored settings (Fn-layer keys, lighting). Re-apply them once (vendor app), then
    back them up so you never have to again:
    ```bash
@@ -70,6 +70,7 @@ pip install hidapi pillow winrt-runtime winrt-Windows.Media.Control winrt-Window
 python host/aula_music.py          # now-playing on the clock page (--speed N px/s; Ctrl+C to stop; disappears ~5 s later)
 python host/aula_screen.py bar 42  # progress bar demo; `release` to undo
 python host/aula_text.py "hello"   # takes over the whole screen; `--release` to give it back
+python host/aula_diag.py           # overlay diagnostics (ticks, frames, why frames were skipped)
 python host/aula_timesync.py       # set the keyboard clock (works on stock firmware too); --watch to keep syncing
 ```
 

@@ -31,10 +31,11 @@ padded to 4 KB blocks. Stored in the external NOR flash at `0x330000` (header) /
 | `04 90 x0 y0 x1 y1 cH cL` | fill rectangle (inclusive coords, RGB565) |
 | `04 91 x y n p0H p0L ...` | `n <= 28` pixels along row `y` starting at `x` |
 | `04 92 mode clip` | `0` stock; `1` host owns screen (firmware blits dropped); `2` GIF frames clipped to `clip` rows |
-| `04 93` | probe; reply bytes 8..11 = `'P','A','T',version` (3 for this firmware) |
+| `04 93` | probe; reply bytes 8..11 = `'P','A','T',version` (4 for this firmware) |
 | `04 94 show ttl px speed` | music overlay: `show=0` hides; `ttl` seconds without refresh before it erases itself; `px` = bar fill 0..240; `speed` = title scroll in px/s (0 keeps the current value, default 40) |
 | `04 95 off n c0..c(n-1)` | write `n <= 56` title chars (ASCII 0x20..0x7E) at buffer offset `off` (buffer 95 chars); not shown until committed |
 | `04 97 len` | commit a title of `len <= 95` chars and restart the scroll. Titles up to 29 chars are static; longer ones scroll smoothly |
+| `04 98 part` | diagnostics: part 0 = overlay state/timing counters, part 1 = why-no-frame counters (little-endian 32-bit words from reply byte 8) |
 | `04 96 a2 a1 a0` | read 56 bytes of internal flash at the 24-bit address into reply bytes 8..63 (used for config backup) |
 
 Coordinates are screen coordinates (0..239, 0..134); the firmware adds the panel offset. Drawing waits for any

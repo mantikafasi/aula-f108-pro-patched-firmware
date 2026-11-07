@@ -12,6 +12,7 @@
  *   04 95 off n c0..            write n<=56 title chars at offset off (buffer 95 chars), not shown yet
  *   04 97 len                   commit title of len chars (restarts the scroll)
  *   04 96 a2 a1 a0              read 56 bytes of internal flash at 24-bit address into data[8..63] (config backup)
+ *   04 98 part                  diagnostics: part 0 = overlay state/timing, part 1 = why-no-frame counters
  *
  * Overlay: title line y=81..96 (firmware's 16px font, rendered here pixel-smooth), bar y=129..132.
  * Runs only while UI page 1 (clock) shows; never waits for the display (skips a frame instead);
@@ -39,7 +40,10 @@ typedef uint32_t u32;
 #define TFT_CS_LO (*(volatile u32 *)0x40046028) /* GPIO1 bit8 */
 #define TFT_CS_HI (*(volatile u32 *)0x40046024)
 
-#define MAGIC 0x5AC0FFEEu
+/* The flasher resets the chip without clearing SRAM, so a state block from the PREVIOUS firmware can survive and look
+ * valid. Bump LAYOUT whenever struct S changes: a stale block then fails the magic check and is re-initialised. */
+#define LAYOUT 4
+#define MAGIC (0x5AC0FF00u | LAYOUT)
 #define TEXT_X 4
 #define TEXT_Y 81
 #define TEXT_W 232
@@ -55,10 +59,13 @@ static volatile struct {
     u8 act, ttl, px, shown;
     u8 dtext, dbar, age, speed, len, cal;
     u32 pos_q8, step_q8, tps, last_tick, last_sec_tick, last_pos;
+    u32 ui_calls, frames, sec_calls, bad;
+    u32 cnt[8];                                           /* why a frame was (not) drawn, see WHY_* */
     char txt[96];
 } *const S = (void *)0x20002e00;
-_Static_assert(sizeof *S <= 0x90, "state must stay below TICKS");
-static volatile u32 *const TICKS = (void *)0x20002e90;   /* SysTick count; only differences matter */
+_Static_assert(sizeof *S <= 0xE0, "state must stay below TICKS");
+static volatile u32 *const TICKS = (void *)0x20002ee0;   /* SysTick count; only differences matter */
+enum { WHY_DRAWN, WHY_INACTIVE, WHY_HIDDEN, WHY_PAGE, WHY_MODE, WHY_BUSY, WHY_PACE, WHY_SAMEPOS };
 
 static u32 udiv(u32 n, u32 d) {                           /* no libgcc here */
     u32 q = 0, r = 0;
@@ -83,9 +90,26 @@ static int wait_idle(void) {
 }
 
 int cmd_hook(int cmd, int val) {
-    if (cmd < 0x90 || cmd > 0x97) return FW_CMD(cmd, val);
+    if (cmd < 0x90 || cmd > 0x98) return FW_CMD(cmd, val);
     volatile u8 *p = PKT;
-    if (cmd == 0x93) { p[8] = 'P'; p[9] = 'A'; p[10] = 'T'; p[11] = 3; return 1; }
+    if (cmd == 0x93) { p[8] = 'P'; p[9] = 'A'; p[10] = 'T'; p[11] = 4; return 1; }
+    if (cmd == 0x98) {                                   /* diagnostics */
+        if (S->magic != MAGIC) return 0;
+        u32 w[14]; unsigned n = 0;
+        if (p[2] == 0) {
+            w[n++] = *TICKS; w[n++] = S->tps; w[n++] = S->step_q8; w[n++] = S->pos_q8; w[n++] = S->last_tick;
+            w[n++] = S->last_sec_tick; w[n++] = S->ui_calls; w[n++] = S->frames; w[n++] = S->sec_calls;
+            w[n++] = (u32)S->act | S->ttl << 8 | S->len << 16 | (u32)S->cal << 24;
+            w[n++] = (u32)PAGE | (u32)BLIT_IDLE << 8 | (u32)S->mode << 16 | (u32)S->speed << 24;
+            w[n++] = (u32)S->dtext | (u32)S->dbar << 8 | (u32)S->px << 16 | (u32)S->shown << 24;
+            w[n++] = S->bad; w[n++] = S->last_pos;
+        } else {
+            for (; n < 8; n++) w[n] = S->cnt[n];
+        }
+        for (unsigned i = 0; i < n; i++)
+            for (unsigned b = 0; b < 4; b++) p[8 + 4 * i + b] = w[i] >> (8 * b);
+        return 1;
+    }
     if (cmd == 0x96) {                                   /* flash read, for config backup */
         u32 a = (u32)p[2] << 16 | (u32)p[3] << 8 | p[4];
         if (a + 56 > 0x40000) return 0;
@@ -187,24 +211,30 @@ static void render(u32 pos) {
 }
 
 static void fast_tick(void) {
-    if (S->magic != MAGIC || !S->act || !S->ttl || !S->len || PAGE != 1 || S->mode == 1) return;
-    if (BLIT_IDLE != 1) return;                           /* never wait here: skip this frame */
+    S->ui_calls++;
+    if (S->magic != MAGIC || !S->act || !S->ttl || !S->len) { S->cnt[WHY_INACTIVE]++; return; }
+    if (PAGE != 1) { S->cnt[WHY_PAGE]++; return; }
+    if (S->mode == 1) { S->cnt[WHY_MODE]++; return; }
+    if (BLIT_IDLE != 1) { S->cnt[WHY_BUSY]++; return; }   /* never wait here: skip this frame */
     u32 t = *TICKS, dt = t - S->last_tick;
-    if (S->len * 8 > TEXT_W) {
-        if (dt < (S->tps >> 5) + 1) return;               /* <= ~30 fps */
-        S->last_tick = t;
-        if (dt > S->tps) dt = S->tps >> 3;                /* e.g. after a long pause */
-        S->pos_q8 += dt * S->step_q8;
-        u32 wrap = (S->len + GAP_CELLS) * 8 * 256;
-        while (S->pos_q8 >= wrap) S->pos_q8 -= wrap;
-        u32 ip = S->pos_q8 >> 8;
-        if (ip == S->last_pos && !S->dtext) return;
-        S->last_pos = ip; S->dtext = 0;
-        render(ip);
-    } else if (S->dtext) {
-        S->dtext = 0;
-        render(0);
+    if (S->dtext) {                                       /* a repaint was requested: never starve it behind pacing */
+        S->dtext = 0; S->last_tick = t; S->last_pos = S->pos_q8 >> 8;
+        S->cnt[WHY_DRAWN]++; S->frames++;
+        render(S->last_pos);
+        return;
     }
+    if (S->len * 8 <= TEXT_W) { S->cnt[WHY_SAMEPOS]++; return; }   /* static title: nothing to animate */
+    if (dt < (S->tps >> 5) + 1) { S->cnt[WHY_PACE]++; return; }    /* <= ~30 fps */
+    S->last_tick = t;
+    if (dt > S->tps) dt = S->tps >> 3;                    /* e.g. after a long pause */
+    S->pos_q8 += dt * S->step_q8;
+    u32 wrap = (S->len + GAP_CELLS) * 8 * 256;
+    while (S->pos_q8 >= wrap) S->pos_q8 -= wrap;
+    u32 ip = S->pos_q8 >> 8;
+    if (ip == S->last_pos) { S->cnt[WHY_SAMEPOS]++; return; }
+    S->last_pos = ip;
+    S->cnt[WHY_DRAWN]++; S->frames++;
+    render(ip);
 }
 
 void ui_hook(void) {                                      /* main loop: stock UI renderer, then the overlay */
@@ -217,10 +247,15 @@ static void overlay_sec(void) {
     if (S->magic != MAGIC) return;
     u32 t = *TICKS, dt = t - S->last_sec_tick;
     S->last_sec_tick = t;
+    S->sec_calls++;
     if (S->cal < 3) {                                    /* first samples: adopt any plausible tick rate */
         if (dt >= 200 && dt <= 20000) { S->tps = dt; S->cal++; }
-    } else if (dt >= (S->tps * 3 >> 2) && dt <= (S->tps * 5 >> 2) + 64)   /* then refine; ignore redraw-induced extras */
-        S->tps = (S->tps * 3 + dt) >> 2;
+    } else if (dt >= (S->tps * 3 >> 2) && dt <= (S->tps * 5 >> 2) + 64) {   /* then refine; ignore redraw-induced extras */
+        S->tps = (S->tps * 3 + dt) >> 2; S->bad = 0;
+    } else if (dt >= 200 && dt <= 20000 && ++S->bad >= 3) {                  /* three misses in a row: we were wrong */
+        S->tps = dt; S->bad = 0;
+    }
+    if (S->tps < 200 || S->tps > 20000) S->tps = 1000;
     S->step_q8 = udiv((u32)S->speed * 256, S->tps);
     if (!S->act || PAGE != 1 || S->mode == 1) return;
     if (!wait_idle()) return;

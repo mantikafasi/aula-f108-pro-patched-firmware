@@ -54,7 +54,7 @@ Text is drawn with opaque black cells. Free: y=80..98 (title line) and y=129..13
 * `bl 0x12a9e` at `0xf84e` (seconds digits) -> `sec_hook` (stock digits, then the 1 Hz part: tick-rate calibration, ttl, progress bar)
 * `bl 0xf156` at `0x826` (main loop UI renderer) -> `ui_hook` (stock renderer, then the smooth title frame)
 * `bl 0x93c` at `0x8cce` (SysTick work) -> `tick_hook` (counts ticks for pacing, then the stock work)
-* state at RAM `0x20002E00`, tick counter at `0x20002E90`, guarded by a 32-bit magic because SRAM isn't known to be zeroed at reset
+* state at RAM `0x20002E00` (224 bytes), tick counter at `0x20002EE0`, guarded by a 32-bit magic because SRAM isn't known to be zeroed at reset
 * title: rendered by the patch itself (232x16 window streamed straight to SPI0 with CS held low, pixel offset per frame),
   <= ~30 fps, never waits for the display; ~108k instructions + 7424 SPI bytes per frame (~6-8 ms, 17-24% CPU at 30 fps,
   SysTick still preempts so key scanning is unaffected). Scroll speed is calibrated against the 1 Hz seconds hook.

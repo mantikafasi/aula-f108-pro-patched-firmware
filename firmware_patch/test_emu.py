@@ -57,7 +57,7 @@ def check(name, cond, info=""):
 # --- 0x93 probe
 L = run(PATCHED, CMD_HOOK, (0x93, 0), pkt=bytes([4, 0x93] + [0] * 62), ram=ram0)
 p = bytes(L["mu"].mem_read(PKT, 16))
-check("probe ack + signature", L["r0"] == 1 and p[8:12] == b"PAT\x03", p[8:12])
+check("probe ack + signature", L["r0"] == 1 and p[8:12] == b"PAT\x04", p[8:12])
 
 # --- 0x90 fillrect (10,20)-(19,24) colour 0xF800
 L = run(PATCHED, CMD_HOOK, (0x90, 0), pkt=bytes([4, 0x90, 10, 20, 19, 24, 0xF8, 0x00] + [0] * 56), ram=ram0)
@@ -97,7 +97,7 @@ check("19 stock commands behave identically via hook", not bad, bad)
 # --- blit hook modes, observing what reaches the ORIGINAL blit (0x7b82)
 def blit(mode_ram, args):
     return run(PATCHED, BLIT_HOOK, args[:4], ram={**ram0, **mode_ram}, stack_args=(args[4],), watch=(0x7B82,), limit=50)
-magic = list(struct.pack("<I", 0x5AC0FFEE))
+magic = list(struct.pack("<I", 0x5AC0FF04))
 r = blit({}, (0, 0, 240, 135, 0x330100))
 check("no magic => pass-through", r["watch"] and r["watch"][0][1] == [0, 0, 240, 135] and r["watch"][0][2] == 0x330100, r["watch"][:1])
 r = blit({STATE: magic + [1, 0]}, (0, 0, 240, 135, 0x330100))
@@ -122,7 +122,7 @@ for a in range(0x100, 0x19F2C, 2):
 check("72 blit sites retargeted, 0 left on original", n_hook >= 72 and n_orig == 0, (n_hook, n_orig))
 
 # ================= v3: music overlay, smooth scroll, flash read, tick/ui hooks =================
-PAGE_ADDR, S0, TICKS_ADDR = 0x2000022D, STATE, 0x20002E90
+PAGE_ADDR, S0, TICKS_ADDR = 0x2000022D, STATE, 0x20002EE0
 FW = {"fill": 0x7B20, "num": 0x12A9E, "blit": 0x7B82, "win": 0x7A92, "ui": 0xF156, "tick": 0x93C}
 RAIL, FILLC = 0x2104, 0x07E0
 FONT = PATCHED[0x15937:0x15937 + 95 * 16]
@@ -199,17 +199,17 @@ def start(title, speed=40, px=0, ttl=5):
 
 # --- commands
 mu = mk({IDLE: [1]})
-check("probe v3", cmd(mu, 4, 0x93) == 1 and bytes(mu.mem_read(PKT + 8, 4)) == b"PAT\x03")
+check("probe v4", cmd(mu, 4, 0x93) == 1 and bytes(mu.mem_read(PKT + 8, 4)) == b"PAT\x04")
 cmd(mu, 4, 0x96, 0x00, 0x3F, 0xC0)
 check("0x96 flash read returns the image bytes", bytes(mu.mem_read(PKT + 8, 56)) == PATCHED[0x3FC0:0x3FC0 + 56])
 check("0x96 refuses to read past flash", cmd(mu, 4, 0x96, 0x03, 0xFF, 0xD0) == 0 and cmd(mu, 4, 0x96, 0x04, 0, 0) == 0)
 check("0x95 chunk bounds", cmd(mu, 4, 0x95, 0, 57) == 0 and cmd(mu, 4, 0x95, 90, 10) == 0 and cmd(mu, 4, 0x97, 96) == 0)
 cmd(mu, 4, 0x95, 0, 4, 0x41, 0xE9, 0x00, 0x7F)
-check("title chars sanitised to the font range", bytes(mu.mem_read(S0 + 40, 4)) == b"A???", bytes(mu.mem_read(S0 + 40, 4)))
+check("title chars sanitised to the font range", bytes(mu.mem_read(S0 + 88, 4)) == b"A???", bytes(mu.mem_read(S0 + 40, 4)))
 
 # --- hooks pass through
 mu = mk({IDLE: [1], PAGE_ADDR: [1]}); set_ticks(mu, 41)
-call(mu, TICK_HOOK); check("tick_hook counts and calls the stock SysTick work", u32(mu, 0x90) == 42 and [r[0] for r in mu.rec] == ["tick"], mu.rec)
+call(mu, TICK_HOOK); check("tick_hook counts and calls the stock SysTick work", u32(mu, 0xE0) == 42 and [r[0] for r in mu.rec] == ["tick"], mu.rec)
 check("ui_hook runs the stock renderer first", [r[0] for r in ui(mu)] == ["ui"])
 tick(mu); check("sec_hook keeps the stock seconds draw", [r[0] for r in mu.rec] == ["num"] and mu.rec[0][1][:4] == (165, 45, 7, 2), mu.rec)
 
@@ -278,5 +278,32 @@ check("...then stays quiet", f(mu, "act") == 0 and tick(mu) == [])
 cmd(mu, 4, 0x94, 1, 9, 10, 0); tick(mu); cmd(mu, 4, 0x94, 0, 0, 0, 0)
 check("explicit hide erases", len(tick(mu)) == 2)
 cmd(mu, 4, 0x94, 1, 9, 10, 0); mu.mem_write(IDLE, b"\0"); check("DMA busy => 1 Hz part skipped (bounded)", tick(mu) == [])
+
+
+# --- hardware regressions (v3 on the real keyboard: title static, never came back after a page change)
+def words(mu, part):
+    cmd(mu, 4, 0x98, part)
+    raw = bytes(mu.mem_read(PKT + 8, 56)); return [int.from_bytes(raw[i:i + 4], "little") for i in range(0, 56, 4)]
+
+mu = start(title, speed=40); set_ticks(mu, 1000); ui(mu)
+frames_before = len(mu.spi)
+call(mu, BLIT_HOOK, (0, 0, 240, 135), (0,))                     # page redraw => repaint requested; the tick counter is STUCK at 1000
+check("repaint request is honoured even if the tick counter is stuck", f(mu, "dtext") == 1)
+ui(mu); p_now = pos_q8(mu) >> 8
+check("...and is painted immediately (not starved by frame pacing)", bytes(mu.spi) == reference(title, p_now, True) and len(mu.spi) == 7424, len(mu.spi))
+ui(mu); check("stuck tick counter: no frame, no hang", mu.spi == [] and [x[0] for x in mu.rec] == ["ui"])
+
+mu = start(title, speed=40); set_ticks(mu, 1000); ui(mu); set_ticks(mu, 1040); ui(mu); set_ticks(mu, 1080); ui(mu)
+w0 = words(mu, 0); w1 = words(mu, 1)
+check("diag part 0: ticks / frames / ui_calls / page / idle", w0[0] == 1080 and w0[7] == 3 and w0[6] == 3 and (w0[10] & 0xFF) == 1 and ((w0[10] >> 8) & 0xFF) == 1, w0[:11])
+check("diag part 1: drawn counter equals frames", w1[0] == 3, w1[:8])
+mu.mem_write(PAGE_ADDR, b""); ui(mu); w1 = words(mu, 1)
+check("diag part 1: counts why frames were skipped (other page)", w1[3] == 1, w1[:8])
+check("diag refused before first use", cmd(mk({IDLE: [1]}), 4, 0x98, 0) == 0)
+
+mu = start("Hi", px=10)
+for k in range(3): set_ticks(mu, 100000 + 1000 * k); tick(mu)
+for k in range(1, 6): set_ticks(mu, 100000 + 2000 + 2000 * k); tick(mu)    # real rate changes to 2000 ticks/s
+check("wrong calibration recovers after consecutive misses", 1500 <= tps(mu) <= 2100, tps(mu))
 
 print("\nALL PASS" if ok else "\nSOME FAILED"); sys.exit(0 if ok else 1)

@@ -38,7 +38,7 @@ Flash
 
 Check it worked and use it
   1. Install Python 3.10+ for Windows.   pip install -r requirements-host.txt
-  2. python host/aula_screen.py probe     ->  "patched firmware v3"
+  2. python host/aula_screen.py probe     ->  "patched firmware v4"
   3. Play music in anything that shows in the Windows media overlay (Spotify, browser, ...), then:
         python host/aula_music.py
      Look at the clock page. Stop it with Ctrl+C; the overlay disappears ~5 s later.
