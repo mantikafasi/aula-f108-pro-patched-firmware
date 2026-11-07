@@ -1,0 +1,17 @@
+# vendor binaries and anything derived from them: never publish
+*.exe
+*.zip
+*.bin
+*.hex
+dist/
+# build output
+*.o
+*.elf
+patch.syms.json
+__pycache__/
+*.pyc
+# private / local
+private/
+*.db
+*.png
+*.log
