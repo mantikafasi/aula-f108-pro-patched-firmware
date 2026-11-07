@@ -42,8 +42,10 @@ Check it worked and use it
   3. Play music in anything that shows in the Windows media overlay (Spotify, browser, ...), then:
         python host/aula_music.py
      Look at the clock page. Stop it with Ctrl+C; the overlay disappears ~5 s later.
-  Do not run aula_music.py while the AULA driver software is configuring the keyboard (two programs talking
-  to the keyboard at once can garble a transfer).
+  To have it start with Windows, also keep the clock right (the keyboard clock drifts), run once:
+        python host/aula_daemon.py --install          (remove with --uninstall; --status shows the log)
+  The background service pauses itself while the AULA driver software is open. Do not run aula_music.py by hand
+  at the same time as the AULA driver software or the service (two programs talking to the keyboard can garble a transfer).
 
 Roll back
   Run ROLLBACK_AULA_F108Pro_stock_flasher.exe exactly like the flasher above. It restores the stock firmware.

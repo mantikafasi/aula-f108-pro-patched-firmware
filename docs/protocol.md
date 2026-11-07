@@ -7,6 +7,15 @@ Send with `HidD_SetFeature`, read the reply with `IOCTL_HID_GET_FEATURE` (`0xB01
 vendor app; ~2 ms works for the commands here. Reply `data[3] == 1` means ack, `0xFF` nack. Bulk data (GIF upload) uses
 4096-byte HID output reports.
 
+## Reply semantics (important)
+The firmware handles a feature report in its main loop, a few milliseconds after the `SetFeature` returns. A
+`GetFeature` issued before that returns the **request echoed back unchanged** (so `data[3]` is still whatever the
+request had, normally 0). Once processed: `data[3] == 1` ack, `0xFF` nack (stock firmware nacks unknown commands,
+including the patch's). A client must wait/retry until `data[3]` is 1 or 0xFF, and for read commands must not treat the
+echo as data. (The time packet is the one exception: it is echoed back verbatim even when processed.)
+Two bugs came from ignoring this: a "stock firmware" misdetection and a flash dump with zero-filled chunks.
+`host/aula_screen.py: probe()` and `host/aula_backup.py` show the safe patterns.
+
 ## Time sync (vendor)
 
 ```

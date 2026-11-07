@@ -86,9 +86,9 @@ async def main(dry, speed):
                     path = t.find()
                     if not path: raise OSError("keyboard not found")
                     h = t.open_dev(path)
-                    ok, raw = t.xfer(h, s.pkt(4, 0x93), delay=0.002)
-                    if raw[9:12] != b"PAT" or raw[12] < 3:
-                        sys.exit("keyboard needs the v3 patched firmware (probe says %r): flash it first" % raw[9:13])
+                    v = s.probe(h)
+                    if v < 3:
+                        sys.exit("keyboard needs the patched firmware v3+ (probe says %d): flash it first" % v)
                 for p in pk:
                     ok, _ = t.xfer(h, p, delay=0.002)
                     if not ok: print("NACK", bytes(p[:6]).hex())

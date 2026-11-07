@@ -16,6 +16,16 @@ def pkt(*b):
     p = bytearray(64); p[:len(b)] = b; return p
 
 
+def probe(h):
+    """-> patch version (int), or 0 for stock firmware. A request the keyboard has not processed yet is echoed back
+    unchanged (data[3] == 0), so keep asking until it answers: 1 = ack, 0xFF = nack (stock firmware nacks 0x93)."""
+    for _ in range(10):
+        ok, raw = t.xfer(h, pkt(4, 0x93), delay=0.004, strict=True)
+        if raw[4] in (1, 0xFF):
+            return raw[12] if raw[9:12] == b"PAT" else 0
+    raise OSError("keyboard did not answer the probe")
+
+
 def rect(x0, y0, x1, y1, c):      # 04 90 x0 y0 x1 y1 colourH colourL
     return pkt(4, 0x90, x0, y0, x1, y1, c >> 8, c & 0xFF)
 
@@ -34,6 +44,8 @@ def main(a):
     cmd = a[0] if a else "probe"
     pk = {"probe": lambda: [pkt(4, 0x93)], "release": lambda: [pkt(4, 0x92, 0, 0)],
           "bar": lambda: bar(float(a[1]))}[cmd]()
+    if cmd == "probe" and not ("--dry-run" in sys.argv):
+        pk = []
     path = t.find()
     if not path:
         sys.exit("keyboard not found")
@@ -42,11 +54,11 @@ def main(a):
         return
     h = t.open_dev(path)
     try:
+        if cmd == "probe":
+            v = probe(h); print("patched firmware v%d" % v if v else "stock firmware (no PAT signature)")
         for p in pk:
             ok, raw = t.xfer(h, p, delay=0.005)
-            if cmd == "probe":
-                print("patched firmware v%d" % raw[12] if raw[9:12] == b"PAT" else "stock firmware (no PAT signature)")
-            elif not ok:
+            if not ok:
                 sys.exit("NACK on %s - stock firmware, or bad arguments" % bytes(p[:8]).hex())
     finally:
         t.k32.CloseHandle(h)

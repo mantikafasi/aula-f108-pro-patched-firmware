@@ -67,6 +67,7 @@ Rollback: run the *original* vendor flasher.
 
 ```bash
 pip install hidapi pillow winrt-runtime winrt-Windows.Media.Control winrt-Windows.Foundation winrt-Windows.Foundation.Collections
+python host/aula_daemon.py --install   # background service at every logon: now-playing + clock resync (--status, --stop, --uninstall)
 python host/aula_music.py          # now-playing on the clock page (--speed N px/s; Ctrl+C to stop; disappears ~5 s later)
 python host/aula_screen.py bar 42  # progress bar demo; `release` to undo
 python host/aula_text.py "hello"   # takes over the whole screen; `--release` to give it back

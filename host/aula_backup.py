@@ -1,5 +1,5 @@
 """Dump the keyboard's live flash (needs patched firmware v3) so your settings survive the next flash.
-  python host/aula_backup.py [OUT.bin] [START END]     default: private/live_flash.bin, 0x8000..0x1A000 (~12 s)
+  python host/aula_backup.py [OUT.bin] [START END]     default: private/live_flash.bin, 0x8000..0x1A000 (~30 s)
 Then:  python tools/make_config_patch.py <the image you flashed> private/live_flash.bin private/config_patch.json
 and rebuild with:  python build_all.py RESET.zip --config private/config_patch.json
 """
@@ -17,19 +17,25 @@ path = t.find()
 if not path:
     sys.exit("keyboard not found")
 h = t.open_dev(path)
-ok, raw = t.xfer(h, s.pkt(4, 0x93), delay=0.002)
-if raw[9:12] != b"PAT" or raw[12] < 3:
-    sys.exit("needs the v3 patched firmware (probe: %r)" % raw[9:13])
+ver = s.probe(h)
+if ver < 3:
+    sys.exit("needs the patched firmware v3+ (probe says %d)" % ver)
 os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
 buf = bytearray()
 try:
     for a in range(start, end, CHUNK):
-        for attempt in range(4):
-            ok, raw = t.xfer(h, s.pkt(4, 0x96, a >> 16 & 0xFF, a >> 8 & 0xFF, a & 0xFF), delay=0.001)
-            if ok: break
+        req = s.pkt(4, 0x96, a >> 16 & 0xFF, a >> 8 & 0xFF, a & 0xFF)
+        for attempt in range(8):
+            # An unprocessed request is echoed back unchanged (zero payload); a processed one has data[3]==1.
+            # So: read twice, require both processed and identical. (If the middle address byte is 1 the echo is
+            # indistinguishable by that flag, so agreement of two slow reads has to do.)
+            ok1, r1 = t.xfer(h, req, delay=0.004, strict=True)
+            ok2, r2 = t.xfer(h, req, delay=0.004, strict=True)
+            if r1[9:9 + CHUNK] == r2[9:9 + CHUNK] and ((ok1 and ok2) or (a >> 8 & 0xFF) == 1):
+                break
         else:
-            sys.exit("read failed at %#x" % a)
-        buf += raw[9:9 + CHUNK]
+            sys.exit("read failed at %#x (never got a processed, consistent reply)" % a)
+        buf += r1[9:9 + CHUNK]
         if (a - start) // CHUNK % 200 == 0:
             print("\r%#x / %#x" % (a, end), end="", flush=True)
 finally:

@@ -91,7 +91,7 @@ def open_dev(path):
     return h
 
 
-def xfer(h, p, delay=DELAY):
+def xfer(h, p, delay=DELAY, strict=False):
     """SetFeature one 64-byte packet, read it back; returns (acked, raw reply)."""
     rep = bytes([0]) + bytes(p)
     time.sleep(delay)
@@ -101,7 +101,7 @@ def xfer(h, p, delay=DELAY):
     out, n = ctypes.create_string_buffer(rep, 65), w.DWORD()
     k32.DeviceIoControl(h, 0xB0192, out, 65, out, 65, ctypes.byref(n), None)  # IOCTL_HID_GET_FEATURE
     # command packets reply with data[3]==1; the time packet is echoed back verbatim (seen on hardware)
-    return out.raw[4] == 1 or out.raw == rep, out.raw
+    return (out.raw[4] == 1) if strict else (out.raw[4] == 1 or out.raw == rep), out.raw   # strict: ignore the unprocessed-echo rule
 
 
 def selftest():

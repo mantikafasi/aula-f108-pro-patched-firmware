@@ -81,7 +81,7 @@ cfg = []
 if CONFIG:
     for run in json.load(open(CONFIG))["runs"]:
         a, d = run["addr"], bytes.fromhex(run["hex"])
-        assert 0x8000 <= a and a + len(d) <= PATCH_AT, "config bytes outside 0x8000..0x1A000: refusing"
+        assert any(lo <= a and a + len(d) <= hi for lo, hi in ((0x8000, 0x8400), (0x9000, 0xB000))),             "config bytes outside the settings pages (0x8000-0x83FF, 0x9000-0xAFFF): refusing"
         assert not any(a < x + 4 and x < a + len(d) for v in sites.values() for x in v), "config overlaps a hook site: refusing"
         img[a:a + len(d)] = d; cfg.append((a, a + len(d)))
     print("baked config:", sum(hi - lo for lo, hi in cfg), "bytes in", len(cfg), "run(s)")
