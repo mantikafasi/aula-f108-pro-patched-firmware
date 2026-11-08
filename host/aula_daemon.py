@@ -12,7 +12,7 @@ It syncs the clock whenever the keyboard (re)connects and then every H hours. It
 (DeviceDriver.exe) is running, so the two never write to the keyboard at the same time. Works on stock firmware too
 (clock sync only; the overlay needs the patched firmware v3+). Log: %LOCALAPPDATA%\\aula-f108pro\\daemon.log
 """
-import argparse, asyncio, ctypes, msvcrt, os, subprocess, sys, time
+import argparse, asyncio, ctypes, os, subprocess, sys, time
 from ctypes import wintypes as w
 
 import aula_music as m
@@ -22,8 +22,7 @@ import aula_timesync as t
 APP = "AULAF108ProDaemon"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 DATA = os.path.join(os.environ.get("LOCALAPPDATA", "."), "aula-f108pro")
-LOG, LOCK = os.path.join(DATA, "daemon.log"), os.path.join(DATA, "daemon.lock")
-LOCK_BYTE = 1024
+LOG = os.path.join(DATA, "daemon.log")
 VENDOR_EXE = "devicedriver.exe"
 FOREGROUND = False
 
@@ -65,29 +64,23 @@ def process_names():
 
 
 def lock_or_exit():
-    os.makedirs(DATA, exist_ok=True)
-    f = open(LOCK, "a+")
-    try:
-        f.seek(LOCK_BYTE); msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)   # lock a byte AFTER the pid text: locked bytes can't be read
-    except OSError:
+    """Single instance via a named kernel mutex. (A lock FILE is not safe: processes started from a sandboxed shell can
+    have their AppData writes redirected, so two copies would each lock their own private file.)"""
+    k = ctypes.WinDLL("kernel32", use_last_error=True)
+    k.CreateMutexW.restype = w.HANDLE
+    k.CreateMutexW.argtypes = [w.LPVOID, w.BOOL, w.LPCWSTR]
+    h = k.CreateMutexW(None, False, "AULAF108ProDaemon")        # no backslash: the name lives in the session namespace
+    if ctypes.get_last_error() == 183:                                     # ERROR_ALREADY_EXISTS
         sys.exit("already running (see --status / --stop)")
-    f.seek(0); f.truncate(0); f.write(str(os.getpid()).ljust(16)); f.flush()
-    return f                                                               # keep referenced: the lock lives with the handle
+    return h                                                               # keep referenced for the life of the process
 
 
 def running_pid():
-    try:
-        pid = int(open(LOCK).read().strip())
-    except (OSError, ValueError):
-        return None
-    probe = open(LOCK, "a+")
-    try:
-        probe.seek(LOCK_BYTE); msvcrt.locking(probe.fileno(), msvcrt.LK_NBLCK, 1); msvcrt.locking(probe.fileno(), msvcrt.LK_UNLCK, 1)
-        return None                                                        # we could take the lock: nobody holds it
-    except OSError:
-        return pid
-    finally:
-        probe.close()
+    ps = (r"Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'aula_daemon\.py' -and "
+          r"$_.CommandLine -notmatch '--(status|stop|install|uninstall|test)' -and $_.ProcessId -ne $PID -and "
+          r"$_.Name -match '^pythonw?\.exe$' } | Select-Object -First 1 -ExpandProperty ProcessId")
+    p = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps], capture_output=True, text=True, timeout=60)
+    return int(p.stdout.strip()) if p.stdout.strip().isdigit() else None
 
 
 def command_line(args):
@@ -97,13 +90,23 @@ def command_line(args):
     return cmd + (" --no-music" if args.no_music else "") + (" --no-sync" if args.no_sync else "")
 
 
+def _wmi(method, value=None):
+    """Run-key access through WMI's StdRegProv (a system service), addressing the user's REAL hive by SID.
+    winreg is not safe here: a process started from a packaged/sandboxed app can have its HKCU writes silently
+    redirected into a private store, and then Windows never sees the autostart entry (it never launches).
+    -> (exit code, stdout)"""
+    ps = ('$sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value;'
+          r'$a=@{hDefKey=[uint32]2147483651;sSubKeyName=$sid+"\Software\Microsoft\Windows\CurrentVersion\Run";sValueName=$env:AULA_NAME};'
+          + {"get": '$r=Invoke-CimMethod -ClassName StdRegProv -MethodName GetStringValue -Arguments $a; if($r.ReturnValue -eq 0){$r.sValue}',
+             "set": '$a.sValue=$env:AULA_CMD; $r=Invoke-CimMethod -ClassName StdRegProv -MethodName SetStringValue -Arguments $a; exit $r.ReturnValue',
+             "del": '$r=Invoke-CimMethod -ClassName StdRegProv -MethodName DeleteValue -Arguments $a; exit $r.ReturnValue'}[method])
+    p = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps], capture_output=True, text=True,
+                       env=dict(os.environ, AULA_NAME=APP, AULA_CMD=value or ""), timeout=60)
+    return p.returncode, p.stdout.strip()
+
+
 def reg_get():
-    import winreg
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
-            return winreg.QueryValueEx(k, APP)[0]
-    except OSError:
-        return None
+    return _wmi("get")[1] or None
 
 
 async def run(args):
@@ -180,16 +183,15 @@ def main():
         sys.exit("--speed must be 1..200 and --sync-hours 0.05..168")
     if a.test:
         return selftest()
-    if a.install or a.uninstall:
-        import winreg
-        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
-            if a.install:
-                winreg.SetValueEx(k, APP, 0, winreg.REG_SZ, command_line(a))
-                print("autostart installed (HKCU Run):", command_line(a))
-            else:
-                try: winreg.DeleteValue(k, APP); print("autostart removed")
-                except OSError: print("no autostart entry")
-        return
+    if a.install:
+        cmd = command_line(a)
+        rc, _ = _wmi("set", cmd)
+        if rc != 0 or reg_get() != cmd:
+            sys.exit("could not write the autostart entry to the real registry (WMI code %s)" % rc)
+        return print("autostart installed (real HKCU Run, verified):", cmd)
+    if a.uninstall:
+        rc, _ = _wmi("del")
+        return print("autostart removed" if rc == 0 else "no autostart entry" if rc == 2 else "removal failed (WMI code %s)" % rc)
     if a.status:
         print("autostart:", reg_get() or "not installed")
         pid = running_pid(); print("running: pid %s" % pid if pid else "running: no")
