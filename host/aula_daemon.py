@@ -113,6 +113,7 @@ def reg_get():
 
 async def run(args):
     h, path, overlay, rings, last_title, last_sync, last_usage, last_err, paused = None, None, False, False, None, 0.0, 0.0, None, False
+    feed = u.Feed()
     log("service started: music=%s sync=%s every %sh speed=%s" % (not args.no_music, not args.no_sync, args.sync_hours, args.speed))
     while True:
         try:
@@ -156,12 +157,11 @@ async def run(args):
                         log("NACK on %s" % bytes(p[:6]).hex())
             if rings and args.usage and time.time() - last_usage >= 30:
                 last_usage = time.time()
-                try:
-                    pk = u.packet(await asyncio.to_thread(u.fetch)); last_err = None
-                except Exception as e:                                     # network / expired login: keep quiet, rings time out
-                    pk = None
-                    if str(e) != last_err: log("usage: %s" % e); last_err = str(e)
-                if pk is not None and not t.xfer(h, pk, delay=0.002)[0]:
+                v = await asyncio.to_thread(feed.get)                      # cached; the API is only asked every few minutes
+                if feed.err != last_err:
+                    last_err = feed.err
+                    if last_err: log("usage: %s" % last_err)
+                if v and not t.xfer(h, u.packet(v), delay=0.002)[0]:
                     log("NACK on usage rings")
         except OSError as e:                                               # unplugged / asleep / resumed from sleep
             log("keyboard: %s" % e)

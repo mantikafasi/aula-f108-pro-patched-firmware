@@ -11,7 +11,7 @@ screen** (USB `0C45:800A`, Sonix SN32F290). It adds:
 Everything else is the stock firmware: keys, lighting, wireless, RTC clock and boot GIF are untouched.
 
 > **Status: experimental.** One keyboard so far. The v2 overlay (title + progress bar, 1 Hz updates) has run on real
-> hardware. **v4 (smooth ~30 fps scrolling title, flash read for config backup, diagnostics) has run on real hardware. v5 (usage rings) is emulator-tested only until it has been flashed.** (v3 did not scroll: stale SRAM from the previous firmware survived the flash; fixed by versioning the state marker.)
+> hardware. **v4 (smooth ~30 fps scrolling title, flash read for config backup, diagnostics) has run on real hardware. v5 (usage rings) has run on real hardware.** (v3 did not scroll: stale SRAM from the previous firmware survived the flash; fixed by versioning the state marker.)
 > Flashing replaces the firmware and can leave the keyboard unusable until re-flashed. This project is not affiliated with AULA, Sonix or HFD. See [Safety](#safety).
 
 ## How it works (short)

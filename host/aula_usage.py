@@ -13,6 +13,7 @@ import aula_screen as s
 import aula_timesync as t
 
 TTL = 150                                                        # seconds the rings live without a refresh
+POLL, STALE = 300, 3600                                          # ask the API every 5 min; keep showing the last answer up to 1 h
 CRED = os.path.join(os.path.expanduser("~"), ".claude", ".credentials.json")
 URL = "https://api.anthropic.com/api/oauth/usage"
 
@@ -45,6 +46,24 @@ def parse(d, now=None):
     return out[0][0], out[1][0], out[0][1], out[1][1]
 
 
+class Feed:
+    """The API rate-limits (HTTP 429), so ask rarely, back off on errors, and serve the last good answer meanwhile."""
+    def __init__(self): self.v, self.at, self.next, self.err = None, 0.0, 0.0, None
+
+    def get(self):
+        """-> (5h %, week %, 5h seconds left, week seconds left) or None; self.err = last problem (None when fine)"""
+        now = time.time()
+        if now >= self.next:
+            try:
+                self.v, self.at, self.next, self.err = fetch(), now, now + POLL, None
+            except Exception as e:
+                ra = getattr(getattr(e, "headers", None), "get", lambda *_: None)("Retry-After")
+                self.err, self.next = str(e), now + min(max(int(ra) if ra and ra.isdigit() else 600, 60), 1800)
+        if self.v is None or now - self.at > STALE: return None
+        p5, pw, r5, rw = self.v; el = now - self.at
+        return p5, pw, max(0, r5 - el), max(0, rw - el)
+
+
 def hm(sec):                                                      # 5h window: "2:14", or "45m" under an hour
     m = int(sec // 60)
     return "%dm" % m if m < 60 else "%d:%02d" % (m // 60, m % 60)
@@ -71,6 +90,14 @@ def selftest():
     assert bytes(packet((34, 83, 8040, 259200))[:14]) == bytes([4, 0x99, 1, TTL, 34, 83]) + b"2:14" + b"3d\0\0"
     assert packet((150, 7, 0, 0))[4] == 100
     assert parse({"five_hour": {"utilization": 5, "resets_at": None}, "seven_day": {"utilization": 6, "resets_at": None}}, now)[2:] == (0, 0)
+    f = Feed(); calls = []
+    globals()["fetch"] = lambda: calls.append(1) or (10, 20, 600.0, 7200.0)
+    v = f.get(); assert v[:2] == (10, 20) and f.err is None and len(calls) == 1
+    f.get(); assert len(calls) == 1, "must not poll again within POLL"
+    def boom(): raise RuntimeError("HTTP Error 429")
+    globals()["fetch"] = boom; f.next = 0; v = f.get()
+    assert v and v[:2] == (10, 20) and f.err == "HTTP Error 429" and f.next > time.time() + 59, "keeps serving the last answer"
+    f.at -= STALE + 1; assert f.get() is None, "gives up after STALE"
     print("selftest ok")
 
 
@@ -85,11 +112,12 @@ def main():
     try:
         if "--hide" in sys.argv:
             return print("hidden" if t.xfer(h, s.pkt(4, 0x99, 0), delay=0.002)[0] else "no ack")
+        feed = Feed()
         while True:
-            try:
-                ok, _ = t.xfer(h, packet(fetch()), delay=0.002); print(time.strftime("%T"), "sent" if ok else "NACK")
-            except Exception as e:
-                print(time.strftime("%T"), "usage:", e)
+            v = feed.get()
+            if feed.err: print(time.strftime("%T"), "usage:", feed.err)
+            if v:
+                ok, _ = t.xfer(h, packet(v), delay=0.002); print(time.strftime("%T"), "sent" if ok else "NACK")
             time.sleep(30)
     except KeyboardInterrupt:
         pass
