@@ -1,4 +1,4 @@
-/* AULA F108Pro (SN32F290, stock "HFD80CP100 V1.08" image) screen-control patch, v3.
+/* AULA F108Pro (SN32F290, stock "HFD80CP100 V1.08" image) screen-control patch, v5.
  * Linked at 0x1A000 (empty flash). Reached only via re-targeted BLs; the original code is untouched.
  *
  * New feature-report commands (b0=0x04, b1=cmd); all ack with data[3]==1 on success:
@@ -13,6 +13,9 @@
  *   04 97 len                   commit title of len chars (restarts the scroll)
  *   04 96 a2 a1 a0              read 56 bytes of internal flash at 24-bit address into data[8..63] (config backup)
  *   04 98 part                  diagnostics: part 0 = overlay state/timing, part 1 = why-no-frame counters
+ *   04 99 show ttl p5 pw s5[4] sw[4]  usage rings (clock page): replaces the left status icons (x=8..133, y=100..127)
+ *                               with two rings: p5/pw = percent 0..100, s5/sw = up to 4 chars (NUL padded) of reset text.
+ *                               show=0 (or ttl expiry) brings the stock icons back via a page redraw
  *
  * Overlay: title line y=81..96 (firmware's 16px font, rendered here pixel-smooth), bar y=129..132.
  * Runs only while UI page 1 (clock) shows; never waits for the display (skips a frame instead);
@@ -30,6 +33,8 @@ typedef uint32_t u32;
 #define FW_NUM   ((void (*)(int, int, int, int, unsigned, unsigned, unsigned))0x12a9f) /* draw number */
 #define FW_UI    ((void (*)(void))0xf157)                          /* UI event renderer (main loop) */
 #define FW_TICK  ((void (*)(void))0x93d)                           /* SysTick work function         */
+#define FW_REDRAW ((void (*)(void))0xffd9)                         /* full page redraw (queues UI events) */
+#define FONT12   ((const u8 *)0x154c3)                             /* 12px font: 12 bytes/glyph, bit0 = left */
 #define FONT16   ((const u8 *)0x15937)                             /* 16px font: 16 bytes/glyph, 1 byte/row, bit0 = left, ASCII 0x20.. */
 
 #define PAGE      (*(volatile u8 *)0x2000022d)  /* UI page id: 1 = main clock page */
@@ -42,7 +47,7 @@ typedef uint32_t u32;
 
 /* The flasher resets the chip without clearing SRAM, so a state block from the PREVIOUS firmware can survive and look
  * valid. Bump LAYOUT whenever struct S changes: a stale block then fails the magic check and is re-initialised. */
-#define LAYOUT 4
+#define LAYOUT 5
 #define MAGIC (0x5AC0FF00u | LAYOUT)
 #define TEXT_X 4
 #define TEXT_Y 81
@@ -53,6 +58,8 @@ typedef uint32_t u32;
 #define FILLC 0x07E0
 
 /* ponytail: SRAM isn't known to be zeroed at reset, so a 32-bit magic guards the state. */
+#include "ring_table.h"
+
 static volatile struct {
     u32 magic;
     u8 mode, clip;
@@ -62,6 +69,8 @@ static volatile struct {
     u32 ui_calls, frames, sec_calls, bad;
     u32 cnt[8];                                           /* why a frame was (not) drawn, see WHY_* */
     char txt[96];
+    u8 uact, uttl, up5, upw, udirty, urestore;            /* usage rings */
+    char us5[5], usw[5];
 } *const S = (void *)0x20002e00;
 _Static_assert(sizeof *S <= 0xE0, "state must stay below TICKS");
 static volatile u32 *const TICKS = (void *)0x20002ee0;   /* SysTick count; only differences matter */
@@ -90,9 +99,9 @@ static int wait_idle(void) {
 }
 
 int cmd_hook(int cmd, int val) {
-    if (cmd < 0x90 || cmd > 0x98) return FW_CMD(cmd, val);
+    if (cmd < 0x90 || cmd > 0x99) return FW_CMD(cmd, val);
     volatile u8 *p = PKT;
-    if (cmd == 0x93) { p[8] = 'P'; p[9] = 'A'; p[10] = 'T'; p[11] = 4; return 1; }
+    if (cmd == 0x93) { p[8] = 'P'; p[9] = 'A'; p[10] = 'T'; p[11] = 5; return 1; }
     if (cmd == 0x98) {                                   /* diagnostics */
         if (S->magic != MAGIC) return 0;
         u32 w[14]; unsigned n = 0;
@@ -114,6 +123,24 @@ int cmd_hook(int cmd, int val) {
         u32 a = (u32)p[2] << 16 | (u32)p[3] << 8 | p[4];
         if (a + 56 > 0x40000) return 0;
         for (unsigned i = 0; i < 56; i++) p[8 + i] = *(const volatile u8 *)(a + i);
+        return 1;
+    }
+    if (cmd == 0x99) {                                   /* usage rings */
+        if (p[2] == 0) { init(); if (S->uact) { S->uact = 0; S->urestore = 1; } return 1; }
+        if (p[3] == 0 || p[4] > 100 || p[5] > 100) return 0;
+        init();
+        unsigned ch = !S->uact || S->up5 != p[4] || S->upw != p[5];
+        S->up5 = p[4]; S->upw = p[5];
+        for (unsigned i = 0; i < 4; i++) {
+            unsigned a = p[6 + i], b = p[10 + i];
+            if (a && (a < 0x20 || a > 0x7e)) a = '?';
+            if (b && (b < 0x20 || b > 0x7e)) b = '?';
+            if (S->us5[i] != a || S->usw[i] != b) ch = 1;
+            S->us5[i] = a; S->usw[i] = b;
+        }
+        S->us5[4] = S->usw[4] = 0;
+        S->uttl = p[3]; S->uact = 1;
+        if (ch) S->udirty = 1;
         return 1;
     }
     if (cmd == 0x92) {
@@ -167,7 +194,8 @@ void blit_hook(int x, int y, int w, int h, unsigned adr) {
     if (S->magic == MAGIC) {
         if (S->mode == 1) return;
         if (S->mode == 2 && w == 240 && h == 135 && S->clip && S->clip < 135) h = S->clip;
-        if (adr == 0 && !x && !y && w == 240 && h == 135) S->dtext = S->dbar = 1;  /* clock background redrawn */
+        if (adr == 0 && !x && !y && w == 240 && h == 135) S->dtext = S->dbar = S->udirty = 1;  /* clock background redrawn */
+        if (S->uact && y == 100 && h == 28 && (x == 8 || x == 40)) { S->udirty = 1; return; }   /* the rings own these icons */
     }
     FW_BLIT(x, y, w, h, adr);
 }
@@ -210,8 +238,49 @@ static void render(u32 pos) {
     TFT_CS_HI = 0x100;
 }
 
+static unsigned ucol(unsigned p) { return p > 85 ? 0xFA89 : p > 60 ? 0xE501 : 0x3DCA; }
+
+static void render_block(unsigned x0, unsigned pct, const char *lab, const volatile char *sub) {
+    unsigned col = ucol(pct), ones = pct > 99 ? 99 : pct, tens = 0;
+    for (unsigned k = 10; k <= 90; k += 10) tens += ones >= k;     /* no libgcc divide here (and clang must not make one) */
+    ones -= tens * 10;
+    char d[2] = { '0' + tens, '0' + ones };
+    FW_WIN(x0, 100, x0 + 59, 127);
+    TFT_CS_LO = 0x100;
+    for (unsigned y = 0; y < 28; y++)
+        for (unsigned x = 0; x < 60; x++) {
+            unsigned c = 0;
+            if (x < 28) {
+                unsigned m = RING[y * 28 + x];
+                c = m < 100 ? (m < pct ? col : 0x2945) : 0;
+                if (x >= 8 && x < 20 && y >= 8 && y < 20) {
+                    unsigned cx = x >= 14;
+                    if ((FONT12[((u8)d[cx] - 0x20) * 12 + y - 8] >> (x - 8 - 6 * cx)) & 1) c = 0xFFFF;
+                }
+            } else if (x >= 31 && ((y >= 1 && y < 13) || (y >= 15 && y < 27))) {
+                unsigned t = x - 31, ci = (t >= 6) + (t >= 12) + (t >= 18) + (t >= 24), row = y < 13 ? y - 1 : y - 15;
+                t -= ci * 6;
+                unsigned ch = ci < 4 ? (y < 13 ? (u8)lab[ci] : (u8)sub[ci]) : 0;
+                if (ch && ((FONT12[(ch - 0x20) * 12 + row] >> t) & 1)) c = y < 13 ? col : 0x8C51;
+            }
+            spi(c >> 8); spi(c & 0xFF);
+        }
+    TFT_CS_HI = 0x100;
+}
+
 static void fast_tick(void) {
     S->ui_calls++;
+    if (S->magic == MAGIC) {
+        if (S->urestore) { S->urestore = 0; if (PAGE == 1 && S->mode != 1) FW_REDRAW(); }
+        if (S->uact && S->udirty && PAGE == 1 && S->mode != 1 && BLIT_IDLE == 1) {
+            S->udirty = 0;
+            FW_FILL(0, 68, 100, 73, 127);                    /* gap between the two rings */
+            static const char L5[4] = "5h", LW[4] = "wk";    /* zero padded: the glyph loop reads 4 chars */
+            render_block(8, S->up5, L5, S->us5);
+            render_block(74, S->upw, LW, S->usw);
+            return;
+        }
+    }
     if (S->magic != MAGIC || !S->act || !S->ttl || !S->len) { S->cnt[WHY_INACTIVE]++; return; }
     if (PAGE != 1) { S->cnt[WHY_PAGE]++; return; }
     if (S->mode == 1) { S->cnt[WHY_MODE]++; return; }
@@ -257,6 +326,7 @@ static void overlay_sec(void) {
     }
     if (S->tps < 200 || S->tps > 20000) S->tps = 1000;
     S->step_q8 = udiv((u32)S->speed * 256, S->tps);
+    if (S->uact && S->uttl && --S->uttl == 0) { S->uact = 0; S->urestore = 1; }   /* host went away: stock icons back */
     if (!S->act || PAGE != 1 || S->mode == 1) return;
     if (!wait_idle()) return;
     if (S->ttl == 0) {                                   /* host went away or asked to hide: erase */

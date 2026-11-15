@@ -43,6 +43,7 @@ UI page id is the byte at `0x2000022d`: `1` = main clock page (also set after a 
 Background full-screen blit from NOR address 0, then: date `YYYY-MM-DD` at y=7 (18 px, cyan), battery % top right,
 big `HH:MM:SS` at y=45 (32 px, white; seconds digits drawn at x=165), status icons 29x28 at y=100 (x=8,40,138,171,204).
 Text is drawn with opaque black cells. Free: y=80..98 (title line) and y=129..134 (below the icons).
+The left icon slot is a 4-state 29x28 icon at x=8 (cases `cmp r0,#1/2/3` at `0xf2ae`) and a 94x28 multi-state image at x=40 (switch at `0xf310`); v5 replaces both with the usage rings. Right icons (x=138/171/204) are two-state.
 
 ## USB command path
 `0x449a` (main loop, state byte `0x200000b8+1`) -> `0x419a` -> dispatcher `0x3fc0(cmd, u16@b8)`; packet buffer at

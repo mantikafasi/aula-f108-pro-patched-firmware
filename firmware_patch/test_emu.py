@@ -57,7 +57,7 @@ def check(name, cond, info=""):
 # --- 0x93 probe
 L = run(PATCHED, CMD_HOOK, (0x93, 0), pkt=bytes([4, 0x93] + [0] * 62), ram=ram0)
 p = bytes(L["mu"].mem_read(PKT, 16))
-check("probe ack + signature", L["r0"] == 1 and p[8:12] == b"PAT\x04", p[8:12])
+check("probe ack + signature", L["r0"] == 1 and p[8:12] == b"PAT\x05", p[8:12])
 
 # --- 0x90 fillrect (10,20)-(19,24) colour 0xF800
 L = run(PATCHED, CMD_HOOK, (0x90, 0), pkt=bytes([4, 0x90, 10, 20, 19, 24, 0xF8, 0x00] + [0] * 56), ram=ram0)
@@ -97,7 +97,7 @@ check("19 stock commands behave identically via hook", not bad, bad)
 # --- blit hook modes, observing what reaches the ORIGINAL blit (0x7b82)
 def blit(mode_ram, args):
     return run(PATCHED, BLIT_HOOK, args[:4], ram={**ram0, **mode_ram}, stack_args=(args[4],), watch=(0x7B82,), limit=50)
-magic = list(struct.pack("<I", 0x5AC0FF04))
+magic = list(struct.pack("<I", 0x5AC0FF05))
 r = blit({}, (0, 0, 240, 135, 0x330100))
 check("no magic => pass-through", r["watch"] and r["watch"][0][1] == [0, 0, 240, 135] and r["watch"][0][2] == 0x330100, r["watch"][:1])
 r = blit({STATE: magic + [1, 0]}, (0, 0, 240, 135, 0x330100))
@@ -123,7 +123,7 @@ check("72 blit sites retargeted, 0 left on original", n_hook >= 72 and n_orig ==
 
 # ================= v3: music overlay, smooth scroll, flash read, tick/ui hooks =================
 PAGE_ADDR, S0, TICKS_ADDR = 0x2000022D, STATE, 0x20002EE0
-FW = {"fill": 0x7B20, "num": 0x12A9E, "blit": 0x7B82, "win": 0x7A92, "ui": 0xF156, "tick": 0x93C}
+FW = {"fill": 0x7B20, "num": 0x12A9E, "blit": 0x7B82, "win": 0x7A92, "ui": 0xF156, "tick": 0x93C, "redraw": 0xFFD8}
 RAIL, FILLC = 0x2104, 0x07E0
 FONT = PATCHED[0x15937:0x15937 + 95 * 16]
 
@@ -169,7 +169,7 @@ def tick(mu): call(mu, SEC_HOOK, (165, 45, 7, 2), (0xFFFF, 0, 32)); return [r fo
 def ui(mu): call(mu, UI_HOOK); return mu.rec
 def set_ticks(mu, v): mu.mem_write(TICKS_ADDR, struct.pack("<I", v))
 def u32(mu, off): return struct.unpack("<I", bytes(mu.mem_read(S0 + off, 4)))[0]
-S_FIELDS = dict(magic=0, mode=4, clip=5, act=6, ttl=7, px=8, shown=9, dtext=10, dbar=11, age=12, speed=13, len=14, cal=15)
+S_FIELDS = dict(magic=0, mode=4, clip=5, act=6, ttl=7, px=8, shown=9, dtext=10, dbar=11, age=12, speed=13, len=14, cal=15, uact=184, uttl=185, up5=186, upw=187, udirty=188, urestore=189)
 def f(mu, name): return bytes(mu.mem_read(S0 + S_FIELDS[name], 1))[0]
 def pos_q8(mu): return u32(mu, 16)
 def tps(mu): return u32(mu, 24)
@@ -199,7 +199,7 @@ def start(title, speed=40, px=0, ttl=5):
 
 # --- commands
 mu = mk({IDLE: [1]})
-check("probe v4", cmd(mu, 4, 0x93) == 1 and bytes(mu.mem_read(PKT + 8, 4)) == b"PAT\x04")
+check("probe v5", cmd(mu, 4, 0x93) == 1 and bytes(mu.mem_read(PKT + 8, 4)) == b"PAT\x05")
 cmd(mu, 4, 0x96, 0x00, 0x3F, 0xC0)
 check("0x96 flash read returns the image bytes", bytes(mu.mem_read(PKT + 8, 56)) == PATCHED[0x3FC0:0x3FC0 + 56])
 check("0x96 refuses to read past flash", cmd(mu, 4, 0x96, 0x03, 0xFF, 0xD0) == 0 and cmd(mu, 4, 0x96, 0x04, 0, 0) == 0)
@@ -305,5 +305,97 @@ mu = start("Hi", px=10)
 for k in range(3): set_ticks(mu, 100000 + 1000 * k); tick(mu)
 for k in range(1, 6): set_ticks(mu, 100000 + 2000 + 2000 * k); tick(mu)    # real rate changes to 2000 ticks/s
 check("wrong calibration recovers after consecutive misses", 1500 <= tps(mu) <= 2100, tps(mu))
+
+
+# ================= v5: usage rings replace the left status icons =================
+import math
+FONT12 = PATCHED[0x154C3:0x154C3 + 95 * 12]
+
+
+def ref_block(pct, lab, sub):
+    col = 0xFA89 if pct > 85 else 0xE501 if pct > 60 else 0x3DCA
+    d = "%02d" % min(pct, 99); out = bytearray()
+    for y in range(28):
+        for x in range(60):
+            c = 0
+            if x < 28:
+                dx, dy = x + .5 - 14, y + .5 - 14; r = math.hypot(dx, dy)
+                if 9 <= r <= 13.3:
+                    t = min(99, int((math.atan2(dx, -dy) % (2 * math.pi)) / (2 * math.pi) * 100))
+                    c = col if t < pct else 0x2945
+                if 8 <= x < 20 and 8 <= y < 20:
+                    cx = int(x >= 14)
+                    if (FONT12[(ord(d[cx]) - 0x20) * 12 + y - 8] >> (x - 8 - 6 * cx)) & 1: c = 0xFFFF
+            elif x >= 31 and (1 <= y < 13 or 15 <= y < 27):
+                ci, t = (x - 31) // 6, (x - 31) % 6
+                s, row, fg = (lab, y - 1, col) if y < 13 else (sub, y - 15, 0x8C51)
+                if ci < min(4, len(s)) and (FONT12[(ord(s[ci]) - 0x20) * 12 + row] >> t) & 1: c = fg
+            out += bytes([c >> 8, c & 255])
+    return bytes(out)
+
+
+def diff_info(a, b):
+    bad = [i // 2 for i in range(0, min(len(a), len(b)), 2) if a[i:i + 2] != b[i:i + 2]]
+    return [(i // 3360, (i % 3360) // 60, i % 60) for i in bad[:12]], len(bad)
+
+
+def rings(mu, show=1, ttl=60, p5=62, pw=18, s5=b"2:14", sw=b"3d"):
+    return cmd(mu, 4, 0x99, show, ttl, p5, pw, *(s5.ljust(4, b"\0") + sw.ljust(4, b"\0")))
+
+
+def uimu():
+    mu = mk({IDLE: [1], PAGE_ADDR: [1]}); set_ticks(mu, 1000); return mu
+
+
+def ui_big(mu): call(mu, UI_HOOK, limit=8_000_000); return mu.rec
+
+
+mu = uimu()
+check("0x99 rejects bad input", rings(mu, p5=101) == 0 and rings(mu, pw=101) == 0 and rings(mu, ttl=0) == 0 and f(mu, "uact") == 0)
+check("0x99 accepts", rings(mu) == 1 and f(mu, "uact") == 1 and f(mu, "udirty") == 1 and f(mu, "uttl") == 60 and f(mu, "up5") == 62)
+r = ui_big(mu)
+check("rings: window per ring, gap cleared, pixels exact",
+      [x[0] for x in r] == ["ui", "fill", "win", "win"] and r[1][1][:4] == (0, 68, 100, 73) and r[2][1][:4] == (8, 100, 67, 127)
+      and r[3][1][:4] == (74, 100, 133, 127) and bytes(mu.spi) == ref_block(62, "5h", "2:14") + ref_block(18, "wk", "3d"), (len(mu.spi), diff_info(bytes(mu.spi), ref_block(62, "5h", "2:14") + ref_block(18, "wk", "3d"))))
+check("rings: CS low/high once per ring", mu.cs == ["lo", "hi", "lo", "hi"], mu.cs)
+rings(mu); ui_big(mu)
+check("rings: unchanged refresh => no redraw", [x[0] for x in mu.rec] == ["ui"] and not mu.spi)
+rings(mu, p5=90, pw=61, s5=b"0:05", sw=b"12h"); ui_big(mu)
+check("rings: changed values repaint (red / amber)", bytes(mu.spi) == ref_block(90, "5h", "0:05") + ref_block(61, "wk", "12h"))
+rings(mu, p5=100, pw=0, s5=b"", sw=b""); ui_big(mu)
+check("rings: 0 and 100 percent", bytes(mu.spi) == ref_block(100, "5h", "") + ref_block(0, "wk", ""))
+rings(mu, s5=b"\x01\xffZ"); check("rings: unprintable reset chars sanitised", bytes(mu.mem_read(S0 + 190, 3)) == b"??Z", bytes(mu.mem_read(S0 + 190, 10)))
+
+mu = uimu(); rings(mu); ui_big(mu)
+for (x, y, w, h, adr, dropped) in ((8, 100, 29, 28, 0x2199C, True), (40, 100, 94, 28, 0x143C8, True), (138, 100, 29, 28, 0x2264C, False),
+                                   (204, 100, 29, 28, 0x1F9E4, False), (8, 50, 29, 28, 0x2199C, False)):
+    call(mu, BLIT_HOOK, (x, y, w, h), (adr,))
+    seen = any(q[0] == "blit" for q in mu.rec)
+    check("blit (%d,%d) %s while rings are up" % (x, y, "dropped" if dropped else "passes"), seen != dropped and (not dropped or f(mu, "udirty") == 1))
+    mu.mem_write(S0 + 188, b"\0")
+call(mu, BLIT_HOOK, (0, 0, 240, 135), (0,)); check("clock background redraw re-dirties the rings", f(mu, "udirty") == 1)
+mu = uimu(); call(mu, BLIT_HOOK, (8, 100, 29, 28), (0x2199C,))
+check("rings inactive => stock icons draw", any(q[0] == "blit" for q in mu.rec))
+
+def quiet_r(name, setup):
+    m = uimu(); rings(m); setup(m); ui_big(m)
+    check("rings not drawn: " + name, [x[0] for x in m.rec] == ["ui"] and not m.spi and f(m, "udirty") == 1, m.rec)
+quiet_r("DMA blit in flight", lambda m: m.mem_write(IDLE, b"\0"))
+quiet_r("other UI page", lambda m: m.mem_write(PAGE_ADDR, b"\2"))
+quiet_r("host owns screen", lambda m: cmd(m, 4, 0x92, 1, 0))
+
+mu = uimu(); rings(mu, ttl=2); ui_big(mu)
+tick(mu); check("rings ttl counts down", f(mu, "uttl") == 1 and f(mu, "uact") == 1)
+tick(mu); check("rings ttl expiry hands back to the stock UI", f(mu, "uact") == 0 and f(mu, "urestore") == 1)
+r = ui_big(mu); check("...via one full page redraw", [x[0] for x in r] == ["ui", "redraw"] and f(mu, "urestore") == 0, r)
+r = ui_big(mu); check("...and only one", [x[0] for x in r] == ["ui"])
+mu = uimu(); rings(mu); ui_big(mu); rings(mu, show=0)
+r = ui_big(mu); check("explicit hide => page redraw", [x[0] for x in r] == ["ui", "redraw"] and f(mu, "uact") == 0, r)
+mu = uimu(); rings(mu); mu.mem_write(PAGE_ADDR, b"\2"); rings(mu, show=0); r = ui_big(mu)
+check("hide while on another page: no redraw needed", [x[0] for x in r] == ["ui"] and f(mu, "urestore") == 0, r)
+mu = uimu()
+cmd(mu, 4, 0x95, 0, 2, 0x48, 0x69); cmd(mu, 4, 0x97, 2); cmd(mu, 4, 0x94, 1, 5, 10, 40); rings(mu); ui_big(mu)
+check("music title and rings coexist (rings first)", len(mu.spi) == 2 * 3360 and f(mu, "dtext") == 1)
+set_ticks(mu, 2000); ui_big(mu); check("...title drawn on the following frame", len(mu.spi) == 7424, len(mu.spi))
 
 print("\nALL PASS" if ok else "\nSOME FAILED"); sys.exit(0 if ok else 1)

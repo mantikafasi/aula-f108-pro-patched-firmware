@@ -8,6 +8,7 @@
 
 Options: --speed N (title px/s, default 40)   --sync-hours H (default 6; the keyboard clock drifts)
          --no-music   --no-sync   --foreground
+         --usage   also show the Claude 5h/weekly limits as rings (firmware v5; reads your Claude Code login, see aula_usage.py)
 It syncs the clock whenever the keyboard (re)connects and then every H hours. It pauses itself while the AULA vendor app
 (DeviceDriver.exe) is running, so the two never write to the keyboard at the same time. Works on stock firmware too
 (clock sync only; the overlay needs the patched firmware v3+). Log: %LOCALAPPDATA%\\aula-f108pro\\daemon.log
@@ -18,6 +19,7 @@ from ctypes import wintypes as w
 import aula_music as m
 import aula_screen as s
 import aula_timesync as t
+import aula_usage as u
 
 APP = "AULAF108ProDaemon"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -87,7 +89,7 @@ def command_line(args):
     pyw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
     exe = pyw if os.path.exists(pyw) else sys.executable
     cmd = f'"{exe}" "{os.path.abspath(__file__)}" --speed {args.speed} --sync-hours {args.sync_hours}'
-    return cmd + (" --no-music" if args.no_music else "") + (" --no-sync" if args.no_sync else "")
+    return cmd + (" --no-music" if args.no_music else "") + (" --no-sync" if args.no_sync else "") + (" --usage" if args.usage else "")
 
 
 def _wmi(method, value=None):
@@ -110,7 +112,7 @@ def reg_get():
 
 
 async def run(args):
-    h, path, overlay, last_title, last_sync, paused = None, None, False, None, 0.0, False
+    h, path, overlay, rings, last_title, last_sync, last_usage, last_err, paused = None, None, False, False, None, 0.0, 0.0, None, False
     log("service started: music=%s sync=%s every %sh speed=%s" % (not args.no_music, not args.no_sync, args.sync_hours, args.speed))
     while True:
         try:
@@ -128,7 +130,8 @@ async def run(args):
                     await asyncio.sleep(5); continue
                 h = t.open_dev(path)
                 ver = s.probe(h)
-                overlay = ver >= 3
+                overlay, rings = ver >= 3, ver >= 5
+                last_usage = 0.0
                 last_title, last_sync = None, 0.0                          # new connection: resend title, resync clock now
                 log("keyboard connected (%s)" % ("patched firmware v%d" % ver if ver else "stock firmware, clock sync only"))
             if not args.no_sync and time.time() - last_sync >= args.sync_hours * 3600:
@@ -151,6 +154,15 @@ async def run(args):
                     ok, _ = t.xfer(h, p, delay=0.002)
                     if not ok:
                         log("NACK on %s" % bytes(p[:6]).hex())
+            if rings and args.usage and time.time() - last_usage >= 30:
+                last_usage = time.time()
+                try:
+                    pk = u.packet(await asyncio.to_thread(u.fetch)); last_err = None
+                except Exception as e:                                     # network / expired login: keep quiet, rings time out
+                    pk = None
+                    if str(e) != last_err: log("usage: %s" % e); last_err = str(e)
+                if pk is not None and not t.xfer(h, pk, delay=0.002)[0]:
+                    log("NACK on usage rings")
         except OSError as e:                                               # unplugged / asleep / resumed from sleep
             log("keyboard: %s" % e)
             if h:
@@ -162,9 +174,9 @@ async def run(args):
 
 
 def selftest():
-    a = argparse.Namespace(speed=50, sync_hours=4, no_music=True, no_sync=False)
+    a = argparse.Namespace(speed=50, sync_hours=4, no_music=True, no_sync=False, usage=True)
     cmd = command_line(a)
-    assert cmd.startswith('"') and "--speed 50" in cmd and "--sync-hours 4" in cmd and "--no-music" in cmd and "--no-sync" not in cmd
+    assert cmd.startswith('"') and "--speed 50" in cmd and "--sync-hours 4" in cmd and "--no-music" in cmd and "--no-sync" not in cmd and cmd.endswith("--usage")
     assert any(n.startswith("python") for n in process_names()), "process enumeration"
     assert VENDOR_EXE == VENDOR_EXE.lower()
     print("selftest ok")
@@ -177,7 +189,7 @@ def main():
     ap.add_argument("--status", action="store_true"); ap.add_argument("--stop", action="store_true")
     ap.add_argument("--test", action="store_true"); ap.add_argument("--foreground", action="store_true")
     ap.add_argument("--speed", type=int, default=40); ap.add_argument("--sync-hours", type=float, default=6)
-    ap.add_argument("--no-music", action="store_true"); ap.add_argument("--no-sync", action="store_true")
+    ap.add_argument("--no-music", action="store_true"); ap.add_argument("--no-sync", action="store_true"); ap.add_argument("--usage", action="store_true")
     a = ap.parse_args()
     if not 1 <= a.speed <= 200 or not 0.05 <= a.sync_hours <= 168:
         sys.exit("--speed must be 1..200 and --sync-hours 0.05..168")
